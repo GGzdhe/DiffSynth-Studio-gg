@@ -1,0 +1,84 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+*.pth
+*.pkl
+dist/
+build/
+.eggs/
+.cache/
+.mypy_cache/
+.pytest_cache/
+.ipynb_checkpoints/
+.msc
+
+
+# 虚拟环境 / 依赖管理
+.venv/
+venv/
+env/
+.env/
+.uv/
+.uv-cache/
+pip-wheel-metadata/
+
+# IDE / 编辑器配置
+.vscode/
+.idea/
+*.swp
+*.swo
+*.bak
+*.orig
+
+# 日志 / 临时文件
+*.log
+*.tmp
+*.temp
+*.pid
+
+# ---- 本项目中特有的大文件/模型/数据 ----
+
+# 本地训练/调试生成的模型权重
+models/**/*
+!models/.gitkeep
+
+# 如果你只想忽略大权重文件，可以更细化：
+# models/**/*.safetensors
+# models/**/*.pt
+# models/**/*.pth
+
+# 视觉检查样本 / 临时可视化结果
+visual_check/
+
+# 示例/训练过程中生成的中间数据（如缓存）
+examples/**/output/
+examples/**/outputs/
+examples/**/runs/
+examples/**/logs/
+
+# 常见数据文件（根据需要放开）
+*.ckpt
+*.npz
+*.npy
+*.h5
+*.hdf5
+
+# 视频/图像大文件（只作为数据时，一般不进 Git）
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.gif
+*.jpg
+*.jpeg
+*.png
+*.webp
+
+# ---- 操作系统文件 ----
+.DS_Store
+Thumbs.db

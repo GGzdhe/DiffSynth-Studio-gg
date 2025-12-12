@@ -1,10 +1,28 @@
-import torch, os, json  # 同时导入 torch、os、json 三个模块
-from diffsynth import load_state_dict  # 从 diffsynth 包中导入权重加载工具（本文件暂未使用）
+import torch, os, json  
+import sys
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__),"../")))
+# os.path.dirname(__file__) 是当前脚本所在目录 (model_training)
+# os.path.join(..., "../") 就是上一级目录 (examples/wanvideo)
+
+# 添加项目根目录 DiffSynth-Studio 到路径 (为了找 diffsynth 包)
+# 从 model_training 往上跳 3 级: ../../../
+sys.path.append(os.path.join(current_dir, "../../../"))
+
+from diffsynth import load_state_dict  # 从 diffsynth 包中导入权重加载工具
 from diffsynth.pipelines.wan_video_new import WanVideoPipeline, ModelConfig  # 导入 Wan 视频管线及模型配置类
 from diffsynth.trainers.utils import DiffusionTrainingModule, ModelLogger, launch_training_task, wan_parser  # 导入训练模块基类、日志器、训练启动函数和 WAN 专用参数解析器
 from diffsynth.trainers.unified_dataset import UnifiedDataset, LoadVideo, LoadAudio, ImageCropAndResize, ToAbsolutePath  # 导入统一数据集和相关数据处理算子
-os.environ["TOKENIZERS_PARALLELISM"] = "false"  # 关闭 tokenizer 的并行化以避免多进程/多线程警告
 
+try:
+    from droid_load_dataset import DroidDataset  # 尝试导入 DroidDataset 类
+except ImportError:
+    raise ImportError("Error: Could not import DroidDataset. Please make sure!") 
+    exit(1)
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"  # 关闭 tokenizer 的并行化以避免多进程/多线程警告
 
 
 class WanTrainingModule(DiffusionTrainingModule):  # 定义继承自 DiffusionTrainingModule 的训练模块
@@ -100,30 +118,22 @@ class WanTrainingModule(DiffusionTrainingModule):  # 定义继承自 DiffusionTr
 
 if __name__ == "__main__":  # 仅当本文件作为脚本直接运行时执行下面的代码
     parser = wan_parser()  # 创建 WAN 特定的命令行参数解析器
+
+    parser.add_argument("--droid_metadata_path",type=str,default="droid_metadata_with_annotations_success.pkl", help="Path to droid metadata pkl file")
+
     args = parser.parse_args()  # 解析命令行参数，得到 args 对象
-    dataset = UnifiedDataset(  # 构建统一数据集对象
-        base_path=args.dataset_base_path,  # 数据集根目录
-        metadata_path=args.dataset_metadata_path,  # 元数据（如 json/pkl）路径
-        repeat=args.dataset_repeat,  # 数据集重复次数，用于扩充训练轮数
-        data_file_keys=args.data_file_keys.split(","),  # 使用哪些字段作为数据文件 key，逗号分隔
-        main_data_operator=UnifiedDataset.default_video_operator(  # 主视频处理算子配置
-            base_path=args.dataset_base_path,  # 基础路径
-            max_pixels=args.max_pixels,  # 限制单帧最大像素数（控制显存）
-            height=args.height,  # 目标高度
-            width=args.width,  # 目标宽度
-            height_division_factor=16,  # 高度必须是 16 的倍数
-            width_division_factor=16,  # 宽度必须是 16 的倍数
-            num_frames=args.num_frames,  # 使用的视频帧数
-            time_division_factor=4,  # 时间维度下采样因子
-            time_division_remainder=1,  # 时间维度偏移/余数
-        ),
-        special_operator_map={  # 针对特定字段的特殊处理算子
-            # 对 "animate_face_video" 字段：先把相对路径转为绝对路径，再加载视频，裁剪/缩放到 512x512，且高度宽度 16 对齐
-            "animate_face_video": ToAbsolutePath(args.dataset_base_path) >> LoadVideo(args.num_frames, 4, 1, frame_processor=ImageCropAndResize(512, 512, None, 16, 16)),
-            # 对 "input_audio" 字段：转为绝对路径后按 16kHz 采样率加载音频
-            "input_audio": ToAbsolutePath(args.dataset_base_path) >> LoadAudio(sr=16000),
-        }
+    print(f" Initializing Droid Dataset from: {args.droid_metadata_path}")
+    dataset = DroidDataset(
+        metadata_path=args.droid_metadata_path,
+        width=args.width,       # 从命令行参数传递过来 (例如 832)
+        height=args.height,     # 从命令行参数传递过来 (例如 480)
+        num_frames=args.num_frames, # 从命令行参数传递过来 (例如 49)
+        sample_stride=1,        # 机器人动作通常较慢，建议 stride 设为 1 保证连贯
+        time_division_factor=4  # 保持默认，匹配 Wan2.1 VAE
     )
+
+    print(f" Dataset loaded! Total samples: {len(dataset)}")
+
     model = WanTrainingModule(  # 实例化训练模块
         model_paths=args.model_paths,  # 模型权重路径（支持多个）
         model_id_with_origin_paths=args.model_id_with_origin_paths,  # model_id 与原始文件路径的映射

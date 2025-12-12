@@ -1,0 +1,75 @@
+[project]
+name = "diffsynth-studio"
+version = "0.1.0"
+requires-python = "==3.11.*"
+dependencies = [
+    "accelerate>=1.12.0",
+    "boto3>=1.42.1",
+    "decord>=0.6.0",
+    "einops>=0.8.1",
+    "ftfy>=6.3.1",
+    "flash-attn==2.7.4.post1",
+    "imageio[ffmpeg]>=2.37.2",
+    "ipykernel>=7.1.0",
+    "modelscope>=1.32.0",
+    "opencv-python-headless>=4.12.0.88",
+    "pandas>=2.3.3",
+    "peft>=0.18.0",
+    "protobuf>=6.33.1",
+    "safetensors>=0.7.0",
+    "sentencepiece>=0.2.1",
+    "torch==2.6.0",
+    "torchaudio==2.6.0",
+    "torchvision==0.21.0",
+    "xfuser[flash-attn]",
+    "datasets>=4.4.1",
+]
+
+
+[tool.uv]
+link-mode = "copy"
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch" },
+]
+torchvision = [
+    { index = "pytorch" },
+]
+torchaudio = [
+    { index = "pytorch" },
+]
+flash-attn = [
+    { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl" }
+]
+
+[tool.uv.extra-build-dependencies]
+flash-attn = [{ requirement = "torch", match-runtime = true }]
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.ruff]
+target-version = "py311"
+line-length = 119
+indent-width = 4
+
+[tool.ruff.lint]
+ignore = ["C901", "E501", "E741", "W605", "C408"]
+select = ["C", "E", "F", "I", "W"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["E402", "F401", "F403", "F811"]
+
+[tool.ruff.lint.isort]
+lines-after-imports = 2
+known-first-party = ["verl"]
+known-third-party = ["torch", "transformers", "wandb"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"

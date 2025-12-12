@@ -375,11 +375,14 @@ class DiffusionTrainingModule(torch.nn.Module):
         
         
     def trainable_modules(self):
+        # 只返回 requires_grad=True 的参数，用于构建优化器
         trainable_modules = filter(lambda p: p.requires_grad, self.parameters())
         return trainable_modules
     
     
     def trainable_param_names(self):
+        # 记录所有 "当前参与训练" 的参数名（requires_grad=True）
+        # 后面导出 ckpt 时会用它来过滤，只保存这些可训练参数
         trainable_param_names = list(filter(lambda named_param: named_param[1].requires_grad, self.named_parameters()))
         trainable_param_names = set([named_param[0] for named_param in trainable_param_names])
         return trainable_param_names
@@ -409,6 +412,13 @@ class DiffusionTrainingModule(torch.nn.Module):
 
 
     def export_trainable_state_dict(self, state_dict, remove_prefix=None):
+        """只导出当前可训练参数的权重，并可选地去掉前缀。
+
+        关键点：
+        1) 先根据 requires_grad 过滤，只保留参与训练的参数，这样 ckpt 里不会包含整个大模型的所有权重；
+        2) 如果传入 remove_prefix（例如 "pipe.vace."），会把这个前缀从 key 名里裁掉，
+           方便后续单独作为子模块/LoRA 权重加载。
+        """
         trainable_param_names = self.trainable_param_names()
         state_dict = {name: param for name, param in state_dict.items() if name in trainable_param_names}
         if remove_prefix is not None:
@@ -452,7 +462,8 @@ class DiffusionTrainingModule(torch.nn.Module):
         # Scheduler
         pipe.scheduler.set_timesteps(1000, training=True)
         
-        # Freeze untrainable models
+        # 冻结所有未在 trainable_models 列表中的子模块，只让指定模块参与训练
+        # 例如 trainable_models="vace" 时，只有 pipe.vace 的参数 requires_grad=True
         pipe.freeze_except([] if trainable_models is None else trainable_models.split(","))
         
         # Enable FP8 if pipeline supports
@@ -494,8 +505,13 @@ class ModelLogger:
     def on_epoch_end(self, accelerator, model, epoch_id):
         accelerator.wait_for_everyone()
         if accelerator.is_main_process:
+            # 1) 先从 Accelerator 中拿到完整的模型 state_dict（包含所有参数）
             state_dict = accelerator.get_state_dict(model)
-            state_dict = accelerator.unwrap_model(model).export_trainable_state_dict(state_dict, remove_prefix=self.remove_prefix_in_ckpt)
+            # 2) 再调用 export_trainable_state_dict 只保留可训练参数，并按需裁掉前缀
+            # ckpt 里只有 vace / LoRA 等被训练的那部分权重，而不是完整模型
+            state_dict = accelerator.unwrap_model(model).export_trainable_state_dict(
+                state_dict, remove_prefix=self.remove_prefix_in_ckpt
+            )
             state_dict = self.state_dict_converter(state_dict)
             os.makedirs(self.output_path, exist_ok=True)
             path = os.path.join(self.output_path, f"epoch-{epoch_id}.safetensors")
@@ -510,8 +526,12 @@ class ModelLogger:
     def save_model(self, accelerator, model, file_name):
         accelerator.wait_for_everyone()
         if accelerator.is_main_process:
+            # step 级别的保存与 on_epoch_end 同理：
+            # 只保存当前可训练参数的子集，并按 remove_prefix_in_ckpt 处理 key
             state_dict = accelerator.get_state_dict(model)
-            state_dict = accelerator.unwrap_model(model).export_trainable_state_dict(state_dict, remove_prefix=self.remove_prefix_in_ckpt)
+            state_dict = accelerator.unwrap_model(model).export_trainable_state_dict(
+                state_dict, remove_prefix=self.remove_prefix_in_ckpt
+            )
             state_dict = self.state_dict_converter(state_dict)
             os.makedirs(self.output_path, exist_ok=True)
             path = os.path.join(self.output_path, file_name)
