@@ -15,7 +15,7 @@ pipe = WanVideoPipeline.from_pretrained(
     ],
 )
 
-pipe.enable_vram_management()
+pipe.enable_vram_management() # 启用显存管理以节省显存
 
 dataset_snapshot_download(
     dataset_id="DiffSynth-Studio/examples_in_diffsynth",

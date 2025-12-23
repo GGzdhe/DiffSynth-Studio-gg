@@ -12,9 +12,11 @@ from dataclasses import dataclass
 import boto3
 import decord
 import numpy as np
+import h5py
 from tqdm import tqdm
 from PIL import Image
 
+import cv2
 import torch
 import torchvision
 from torch.utils.data import DataLoader, Dataset
@@ -167,18 +169,22 @@ class DroidVedioFrameDataset(Dataset):
 ##############################################################
 
 class LoadVideoFromOSS(DataProcessingOperator):
-    def __init__(self, num_frames=81, time_division_factor=4, time_division_remainder=1, frame_processor=lambda x: x, sample_strategy="random"):
+    def __init__(self, num_frames=81, time_division_factor=4, time_division_remainder=1, 
+                 frame_processor=lambda x: x, sample_strategy="random", frame_interval=3):
         """
         :param sample_strategy: 采样策略
             - "start": 从头截取连续片段
             - "random": 随机截取连续片段
             - "uniform": 在整个视频时长内均匀采样
+            - "interval": 按照 frame_interval 指定的间隔进行随机采样
+        :param frame_interval: 当 sample_strategy 为 "interval" 时的采样间隔
         """
         self.num_frames = num_frames
         self.time_division_factor = time_division_factor
         self.time_division_remainder = time_division_remainder
         self.frame_processor = frame_processor
         self.sample_strategy = sample_strategy
+        self.frame_interval = frame_interval
         self.s3 = boto3.client('s3')
     
     def get_actual_frames(self, total_frames):
@@ -204,17 +210,34 @@ class LoadVideoFromOSS(DataProcessingOperator):
                 
                 actual_frames = self.get_actual_frames(total_frames)
                 
-                if total_frames <= self.num_frames: # 视频比目标帧数少
+                # 视频总帧数少于目标帧数，全取
+                if total_frames <= self.num_frames: 
                     indices = list(range(actual_frames))
                 else:
+                    # 计算 indices
                     if self.sample_strategy == "start":
                         indices = list(range(actual_frames))
+                        
                     elif self.sample_strategy == "random":
                         max_start = total_frames - actual_frames
                         start_index = random.randint(0, max_start)
                         indices = list(range(start_index, start_index + actual_frames))
+                        
                     elif self.sample_strategy == "uniform":
                         indices = np.linspace(0, total_frames - 1, actual_frames, dtype=int).tolist()
+                        
+                    elif self.sample_strategy == "interval":
+                        # 计算需要的总跨度：(帧数-1) * 间隔 + 1
+                        required_span = (actual_frames - 1) * self.frame_interval + 1
+                        
+                        if total_frames >= required_span:
+                            # 视频够长
+                            max_start = total_frames - required_span
+                            start_index = random.randint(0, max_start)
+                            indices = [start_index + i * self.frame_interval for i in range(actual_frames)]
+                        else:
+                            # 如果视频不够长
+                            indices = np.linspace(0, total_frames - 1, actual_frames, dtype=int).tolist()
                     
                 video_data = reader.get_batch(indices).asnumpy()
                 frames = []
@@ -224,7 +247,6 @@ class LoadVideoFromOSS(DataProcessingOperator):
                     frames.append(frame)
                 
         return frames
-
 
 class ImageCropAndResize(DataProcessingOperator):
     def __init__(self, height, width, max_pixels, height_division_factor, width_division_factor):
@@ -256,6 +278,7 @@ class ImageCropAndResize(DataProcessingOperator):
         else:
             height, width = self.height, self.width
         return height, width
+    
     
     def __call__(self, data: Image.Image):
         image = self.crop_and_resize(data, *self.get_height_width(data))
@@ -314,13 +337,131 @@ class DroidVedioDataset(Dataset):
 
         return data
 
+# 加入 Affordence Mask dataloader
+class AffordenceMaskDataset(Dataset):
+    """
+    提取Droid视频数据，带Affordence Mask
+    """
+    def __init__(self, 
+                 metadata_path:str = "droid_metadata_with_annotations_success.pkl",
+                 affordence_mask_path:str = "data/affordence/droid_annotations_merged_new_filtered.h5",
+                 affordence_index:str = "data/affordence/droid_annotations_merged_new_filtered.pkl",
+                 repeat = 1,
+                 video_operator = lambda x:x,
+                 mask_reshape = None) -> None:
+        
+        self.s3 = boto3.client('s3')
+        
+        with open(affordence_index, "rb") as f:
+            self.affordence_index = pickle.load(f)
+        self.affordence_mask_path = affordence_mask_path
+        self.metadata = load_droid_metadata(metadata_path)
+        self.length = len(self.affordence_index)
+        self.mask_reshape = mask_reshape
+        
+        self.repeat = repeat
+        self.video_operator = video_operator
+        self.load_from_cache = False # 兼容DiffSynth代码
+        
+    
+    def __len__(self) -> int:
+        return self.length * self.repeat
+    
+    def get_metadata(self, index) -> tuple[Droid_DAindex, str]:
+        index = index % self.length
+        uuid, left_or_right =  self.affordence_index[index].split("/")
+        
+        return self.metadata[uuid], left_or_right
+    
+    # def load_affordence_mask(self, uuid, left_or_right) -> np.ndarray:
+    #     with h5py.File(self.affordence_mask_path, "r") as f:
+    #         mask = f[uuid][left_or_right]['masks'][:]
+        
+    #     if self.mask_reshape is not None:
+    #         resized_masks_bool = np.empty((mask.shape[0], self.mask_reshape[0], self.mask_reshape[1]), dtype=bool)
+    #         for i in range(mask.shape[0]):
+    #             mask_uint8 = mask[i,:].astype(np.uint8)
+    #             resized_mask = cv2.resize(mask_uint8, dsize=self.mask_reshape[::-1], interpolation=cv2.INTER_NEAREST)
+    #             resized_masks_bool[i,:] = resized_mask.astype(bool)
+    #         mask = resized_masks_bool
+            
+    #     return mask
+
+    def load_affordence_mask(self, uuid, left_or_right, frame_nums) -> list:
+        with h5py.File(self.affordence_mask_path, "r") as f:
+            raw_masks = f[uuid][left_or_right]['masks'][:]
+        
+        if raw_masks.shape[0] > 0:
+            merged_mask = np.any(raw_masks, axis=0).astype(np.uint8)
+        else:
+            # 如果原始数据为空，创建一个全黑的 720x1280 矩阵， 一般不会有这个情况
+            merged_mask = np.zeros((720, 1280), dtype=np.uint8)
+
+        if self.mask_reshape is not None:
+            merged_mask = cv2.resize(
+                merged_mask, 
+                self.mask_reshape[::-1], 
+                interpolation=cv2.INTER_NEAREST
+            )
+    
+        main_mask_pil = Image.fromarray(merged_mask * 255, mode='L').convert("RGB")
+
+        mask_list = [main_mask_pil]
+        
+        if frame_nums > 1:
+            w, h = main_mask_pil.size
+            # 创建全黑图
+            empty_mask_pil = Image.new("RGB", (w, h), (0, 0, 0))
+            
+            for _ in range(frame_nums - 1):
+                mask_list.append(empty_mask_pil)
+                
+        return mask_list
+    
+    def __getitem__(self, index) -> dict[str, any]:
+        metadata, left_or_right = self.get_metadata(index)
+        
+        if left_or_right == "left_frame":
+            video_choose = "left_mp4_path"
+        else:
+            video_choose = "right_mp4_path"
+
+        keys_map = {
+            "video" : video_choose, # video 要在最前面前声明
+            "prompt" : "language_instruction1",
+            "vace_reference_image" : "vace_reference_video",
+            "vace_video_mask" : "affordence_mask"
+        }
+        
+        data :dict[str, any] = dict()
+        for key in keys_map:
+            if hasattr(metadata, keys_map[key]):
+                if key == "video":
+                    data[key] = self.video_operator(getattr(metadata, keys_map[key]))
+                elif key == "prompt":
+                    data[key] = getattr(metadata, keys_map[key])
+                else:
+                    raise ValueError(f"key {key} not found")
+            else:
+                if key == "vace_reference_image":
+                    data[key] = data["video"][0] if data["video"] is not None else None
+                elif keys_map[key] == "affordence_mask":
+                    data[key] = self.load_affordence_mask(metadata.uuid, left_or_right, len(data["video"]))
+                else:
+                    raise ValueError(f"key {key} not found")
+
+        return data
+
 if __name__ == "__main__":
     # metadata = load_droid_metadata()
     # print(len(metadata))
     # make_droid_metadata()
     
-    dataset = DroidVedioDataset(
-        video_operator = LoadVideoFromOSS(49, 4, 1, frame_processor=ImageCropAndResize(512, 512, None, 16, 16))
+    dataset = AffordenceMaskDataset(
+        video_operator = LoadVideoFromOSS(49, 4, 1, frame_processor=ImageCropAndResize(480, 832, None, 16, 16)), mask_reshape = (480, 832)
     )
     print(len(dataset))
     print(dataset[0])
+    print(np.max(np.array(dataset[1000]["vace_video_mask"][0], np.float32)/255))
+    print(np.sum(np.array(dataset[1000]["vace_video_mask"][0], np.float32)/255))
+    

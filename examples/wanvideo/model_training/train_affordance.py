@@ -1,28 +1,155 @@
 import torch, os, json  
 import sys
+import math
+import argparse
+from tqdm import tqdm
+from accelerate import Accelerator, DistributedDataParallelKwargs
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__),"../")))
-# os.path.dirname(__file__) 是当前脚本所在目录 (model_training)
-# os.path.join(..., "../") 就是上一级目录 (examples/wanvideo)
-
-# 添加项目根目录 DiffSynth-Studio 到路径 (为了找 diffsynth 包)
-# 从 model_training 往上跳 3 级: ../../../
 sys.path.append(os.path.join(current_dir, "../../../"))
 
 from diffsynth import load_state_dict  # 从 diffsynth 包中导入权重加载工具
 from diffsynth.pipelines.wan_video_new import WanVideoPipeline, ModelConfig  # 导入 Wan 视频管线及模型配置类
-from diffsynth.trainers.utils import DiffusionTrainingModule, ModelLogger, launch_training_task, wan_parser  # 导入训练模块基类、日志器、训练启动函数和 WAN 专用参数解析器
-from diffsynth.trainers.unified_dataset import UnifiedDataset, LoadVideo, LoadAudio, ImageCropAndResize, ToAbsolutePath  # 导入统一数据集和相关数据处理算子
+from diffsynth.trainers.utils import DiffusionTrainingModule, ModelLogger # 导入训练模块基类、日志器、训练启动函数和 WAN 专用参数解析器
 
 try:
-    from droid_load_dataset import DroidDataset, LoadVideoFromOSS, ImageCropAndResize  # 尝试导入 DroidDataset 类
+    from droid_load_dataset_affordance import AffordanceDataset, LoadVideoFromOSS, ImageCropAndResize  # 尝试导入 DroidDataset 类
 except ImportError:
-    raise ImportError("Error: Could not import DroidDataset. Please make sure!") 
-    exit(1)
+    raise ImportError("Error: Could not import AffordanceDataset. Please make sure!") 
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"  # 关闭 tokenizer 的并行化以避免多进程/多线程警告
+
+def wan_parser():
+    parser = argparse.ArgumentParser(description="Simple example of a training script.")
+    parser.add_argument("--max_pixels", type=int, default=1280*720, help="Maximum number of pixels per frame.")
+    parser.add_argument("--height", type=int, default=None, help="Height of images or videos.")
+    parser.add_argument("--width", type=int, default=None, help="Width of images or videos.")
+    parser.add_argument("--num_frames", type=int, default=81, help="Number of frames per video.")
+    parser.add_argument("--data_file_keys", type=str, default="image,video", help="Data file keys.")
+    parser.add_argument("--dataset_repeat", type=int, default=1, help="Dataset repeat.")
+    parser.add_argument("--model_paths", type=str, default=None, help="Paths to load models.")
+    parser.add_argument("--model_id_with_origin_paths", type=str, default=None, help="Model ID with origin paths.")
+    parser.add_argument("--audio_processor_config", type=str, default=None, help="Audio processor config.")
+    parser.add_argument("--learning_rate", type=float, default=1e-4, help="Learning rate.")
+    parser.add_argument("--num_epochs", type=int, default=1, help="Number of epochs.")
+    parser.add_argument("--output_path", type=str, default="./models", help="Output save path.")
+    parser.add_argument("--remove_prefix_in_ckpt", type=str, default="pipe.dit.", help="Remove prefix in ckpt.")
+    parser.add_argument("--trainable_models", type=str, default=None, help="Models to train.")
+    parser.add_argument("--lora_base_model", type=str, default=None, help="Which model LoRA is added to.")
+    parser.add_argument("--lora_target_modules", type=str, default="q,k,v,o,ffn.0,ffn.2", help="LoRA target modules.")
+    parser.add_argument("--lora_rank", type=int, default=32, help="Rank of LoRA.")
+    parser.add_argument("--lora_checkpoint", type=str, default=None, help="Path to the LoRA checkpoint.")
+    parser.add_argument("--extra_inputs", default=None, help="Additional model inputs.")
+    parser.add_argument("--use_gradient_checkpointing_offload", default=False, action="store_true", help="Offload gradient checkpointing.")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Gradient accumulation steps.")
+    parser.add_argument("--max_timestep_boundary", type=float, default=1.0, help="Max timestep boundary.")
+    parser.add_argument("--min_timestep_boundary", type=float, default=0.0, help="Min timestep boundary.")
+    parser.add_argument("--find_unused_parameters", default=False, action="store_true", help="Find unused parameters.")
+    parser.add_argument("--save_steps", type=int, default=None, help="Checkpoint saving intervals.")
+    parser.add_argument("--dataset_num_workers", type=int, default=0, help="Number of workers.")
+    parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay.")
+    
+    # [新增参数]支持 resume 和 sample_strategy
+    parser.add_argument("--sample_strategy", type=str, default="random", help="Data Sample strategy.")
+    parser.add_argument("--checkpoints_output_dir", type=str, required=True, help="checkpoints_output_dir")
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="resume_from_checkpoint")
+    return parser
+
+def launch_training_task(
+    dataset: torch.utils.data.Dataset,
+    model: DiffusionTrainingModule,
+    model_logger: ModelLogger,
+    learning_rate: float = 1e-5,
+    weight_decay: float = 1e-2,
+    num_workers: int = 8,
+    save_steps: int = None,
+    num_epochs: int = 1,
+    gradient_accumulation_steps: int = 1,
+    find_unused_parameters: bool = False,
+    args = None,
+    # 新增参数默认值
+    output_dir: str = "./checkpoints", 
+    resume_from_checkpoint: str = None 
+):
+    if args is not None:
+        learning_rate = args.learning_rate
+        weight_decay = args.weight_decay
+        num_workers = args.dataset_num_workers
+        save_steps = args.save_steps
+        num_epochs = args.num_epochs
+        gradient_accumulation_steps = args.gradient_accumulation_steps
+        find_unused_parameters = args.find_unused_parameters
+        if hasattr(args, "checkpoints_output_dir"): output_dir = args.checkpoints_output_dir
+        if hasattr(args, "resume_from_checkpoint"): resume_from_checkpoint = args.resume_from_checkpoint
+
+    optimizer = torch.optim.AdamW(model.trainable_modules(), lr=learning_rate, weight_decay=weight_decay)
+    scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer)
+    dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=lambda x: x[0], num_workers=num_workers)
+    
+    accelerator = Accelerator(
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=find_unused_parameters)],
+        project_dir=output_dir 
+    )
+    
+    model, optimizer, dataloader, scheduler = accelerator.prepare(model, optimizer, dataloader, scheduler)
+
+    global_step = 0
+    first_epoch = 0
+
+    # [断点续训逻辑]
+    if resume_from_checkpoint:
+        if resume_from_checkpoint != "":
+            print(f"Resuming from checkpoint: {resume_from_checkpoint}")
+            accelerator.load_state(resume_from_checkpoint)
+            try:
+                step_from_path = int(os.path.basename(resume_from_checkpoint).split("-")[-1])
+                global_step = step_from_path
+            except ValueError:
+                pass
+            
+            num_update_steps_per_epoch = math.ceil(len(dataloader) / gradient_accumulation_steps)
+            first_epoch = global_step // num_update_steps_per_epoch
+            resume_step = global_step % num_update_steps_per_epoch
+            print(f"Resuming at Epoch {first_epoch}, Step {resume_step} (Global Step {global_step})")
+
+    for epoch_id in range(first_epoch, num_epochs):
+        model.train()
+        
+        if resume_from_checkpoint and epoch_id == first_epoch and resume_step > 0:
+            active_dataloader = accelerator.skip_first_batches(dataloader, resume_step * gradient_accumulation_steps)
+        else:
+            active_dataloader = dataloader
+
+        progress_bar = tqdm(active_dataloader, disable=not accelerator.is_local_main_process)
+        progress_bar.set_description(f"Epoch {epoch_id}")
+
+        for step, data in enumerate(progress_bar):
+            with accelerator.accumulate(model):
+                optimizer.zero_grad()
+                if dataset.load_from_cache:
+                    loss = model({}, inputs=data)
+                else:
+                    loss = model(data)
+                accelerator.backward(loss)
+                optimizer.step()
+                scheduler.step()
+                
+                if accelerator.sync_gradients:
+                    global_step += 1
+                    if save_steps and global_step % save_steps == 0:
+                        save_path = os.path.join(output_dir, f"checkpoint-{global_step}")
+                        accelerator.save_state(save_path)
+                        model_logger.on_step_end(accelerator, model, save_steps)
+
+        # Epoch 结束保存
+        accelerator.save_state(os.path.join(output_dir,  f"checkpoint-{global_step}"))
+        if save_steps is None:
+            model_logger.on_epoch_end(accelerator, model, epoch_id)
+            
+    model_logger.on_training_end(accelerator, model, save_steps)
 
 
 class WanTrainingModule(DiffusionTrainingModule):  # 定义继承自 DiffusionTrainingModule 的训练模块
@@ -96,7 +223,7 @@ class WanTrainingModule(DiffusionTrainingModule):  # 定义继承自 DiffusionTr
             elif extra_input == "end_image":
                 inputs_shared["end_image"] = data["video"][-1]  # 使用视频的最后一帧作为 end_image
             elif extra_input == "reference_image" or extra_input == "vace_reference_image":
-                inputs_shared[extra_input] = data[extra_input][0]  # 对于参考图像，通常从列表中取第 0 个
+                inputs_shared[extra_input] = data[extra_input]  # 对于参考图像，通常从列表中取第 0 个
             else:
                 inputs_shared[extra_input] = data[extra_input]  # 其他额外字段直接从 data 中取
         
@@ -118,24 +245,17 @@ class WanTrainingModule(DiffusionTrainingModule):  # 定义继承自 DiffusionTr
 
 if __name__ == "__main__":  # 仅当本文件作为脚本直接运行时执行下面的代码
     parser = wan_parser()  # 创建 WAN 特定的命令行参数解析器
+    args = parser.parse_args()
 
-    parser.add_argument("--droid_metadata_path",type=str,default="droid_metadata_with_annotations_success.pkl", help="Path to droid metadata pkl file")
+    print(f"Initializing Affordance Dataset (Strategy:{args.sample_strategy})")
 
-    parser.add_argument("--sample_strategy", type=str, default="random", help="start, random, or uniform")
-    
-    args = parser.parse_args()  # 解析命令行参数，得到 args 对象
-    print(f" Initializing Droid Dataset from: {args.droid_metadata_path}")
-    print(f" Config: {args.width}x{args.height}, Frames: {args.num_frames}, Strategy: {args.sample_strategy}")
-
-    # 组装 Dataset
-    
-    # 1. 实例化图片处理器 (Processor)
+    # 实例化图片处理器 (Processor)
     img_processor = ImageCropAndResize(
         height=args.height, 
         width=args.width
     )
     
-    # 2. 实例化视频加载器 (Operator)，注入处理器
+    # 实例化视频加载器 (Operator)，注入处理器
     video_loader = LoadVideoFromOSS(
         num_frames=args.num_frames,
         sample_stride=1,
@@ -144,10 +264,13 @@ if __name__ == "__main__":  # 仅当本文件作为脚本直接运行时执行�
     )
     
     # 3. 实例化数据集，注入加载器
-    dataset = DroidDataset(
-        metadata_path=args.droid_metadata_path,
-        video_operator=video_loader
+    dataset = AffordanceDataset(
+        video_operator = video_loader,
+        width = args.width,
+        height = args.height,
+        repeat = args.dataset_repeat
     )
+
     print(f" Dataset loaded! Total samples: {len(dataset)}")
 
     model = WanTrainingModule(  # 实例化训练模块
@@ -168,4 +291,7 @@ if __name__ == "__main__":  # 仅当本文件作为脚本直接运行时执行�
         args.output_path,  # 输出目录（保存日志、权重等）
         remove_prefix_in_ckpt=args.remove_prefix_in_ckpt  # 是否在保存 checkpoint 时移除参数前缀
     )
+
+    print(f"Extra inputs configured : {args.extra_inputs}")
+
     launch_training_task(dataset, model, model_logger, args=args)  # 启动训练任务，内部会创建 DataLoader、优化器、训练循环等

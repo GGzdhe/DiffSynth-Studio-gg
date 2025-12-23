@@ -15,6 +15,7 @@ import numpy as np  # 导入 numpy，常用为 np
 from tqdm import tqdm  # 导入 tqdm，用于显示进度条
 from PIL import Image  # 导入 PIL 图像模块（目前这个文件里没有使用）
 
+import torchvision.transforms.functional as TF  
 import torch  # 导入 PyTorch 主模块
 import torchvision  # 导入 torchvision
 from torch.utils.data import DataLoader, Dataset  # 导入 DataLoader 和 Dataset 基类
@@ -182,144 +183,151 @@ class DroidVedioFrameDataset(Dataset):  # 定义 PyTorch 数据集类
         }
     
 
+class ImageCropAndResize:
+    """
+    负责图像的空间变换
+    逻辑: DiffSynth 原生逻辑 (torchvision + round + bilinear)
+    """
+    def __init__(self, height, width):
+        self.height = height
+        self.width = width
+
+    def __call__(self, image: Image.Image) -> Image.Image:
+        width, height = image.size
+        # 1. 计算缩放比例 (保证短边填满目标)
+        scale = max(self.width / width, self.height / height)
+        
+        # 2. Resize (使用 round 四舍五入，对齐官方逻辑)
+        new_h = round(height * scale)
+        new_w = round(width * scale)
+        image = TF.resize(image, (new_h, new_w), interpolation=TF.InterpolationMode.BILINEAR)
+        
+        # 3. Center Crop
+        image = TF.center_crop(image, (self.height, self.width))
+        return image
+
+
+class LoadVideoFromOSS:
+    """
+    负责从 OSS 下载视频、时序采样、解码
+    """
+    def __init__(self, num_frames=49, sample_stride=1, sample_strategy="random", frame_processor=None):
+        self.num_frames = num_frames
+        self.sample_stride = sample_stride
+        self.sample_strategy = sample_strategy  # "random", "uniform", "start"
+        self.frame_processor = frame_processor  # 通常传入 ImageCropAndResize 实例
+        
+        # VAE 约束参数
+        self.time_division_factor = 4
+        self.time_division_remainder = 1
+        
+        self.s3 = boto3.client('s3')
+
+    def get_valid_indices(self, total_frames):
+        """计算需要读取的帧索引"""
+        req_frames = self.num_frames
+        
+        # 1. 短视频处理：降级帧数以适应 VAE (4k+1)
+        if total_frames < req_frames:
+            req_frames = total_frames
+            while req_frames > 1 and req_frames % self.time_division_factor != self.time_division_remainder:
+                req_frames -= 1
+        
+        # 2. 根据策略生成索引
+        actual_span = (req_frames - 1) * self.sample_stride + 1
+        indices = []
+
+        if total_frames < actual_span:
+            # 极短视频：全取
+            indices = list(range(req_frames))
+        else:
+            if self.sample_strategy == "uniform":
+                # 均匀采样 (覆盖全视频)
+                indices = np.linspace(0, total_frames - 1, req_frames, dtype=int).tolist()
+            elif self.sample_strategy == "start":
+                # 从头开始
+                indices = [i * self.sample_stride for i in range(req_frames)]
+            else: 
+                # "random" (默认)：随机连续切片
+                max_start = total_frames - actual_span
+                start_idx = random.randint(0, max_start)
+                indices = [start_idx + i * self.sample_stride for i in range(req_frames)]
+                
+        return indices
+
+    def __call__(self, oss_path: str):
+        with temp_file_contextmanager(".mp4") as temp_file:
+            # 下载
+            self.s3.download_file(OSS_BUCKET, oss_path, temp_file)
+            
+            # 读取与处理
+            with videoReader_contextmanager(temp_file) as vr:
+                indices = self.get_valid_indices(len(vr))
+                video_data = vr.get_batch(indices).asnumpy()
+                
+                frames = []
+                for frame_arr in video_data:
+                    img = Image.fromarray(frame_arr)
+                    # 调用传入的 frame_processor (CropAndResize)
+                    if self.frame_processor:
+                        img = self.frame_processor(img)
+                    frames.append(img)
+                    
+        return frames
 
 class DroidDataset(Dataset):
     def __init__(
         self, 
-        metadata_path: str = "droid_metadata_with_annotations_success.pkl",
-        width: int = 832,
-        height: int = 480,
-        num_frames: int = 49,
-        sample_stride: int = 1,
-        time_division_factor: int = 4,   # 对应 utils.py 中的 VAE 压缩倍率
-        time_division_remainder: int = 1 # 对应 utils.py 中的余数 (k*4 + 1)
+        metadata_path: str,
+        video_operator, # 注入视频处理算子 (LoadVideoFromOSS)
     ) -> None:
-        self.s3 = boto3.client('s3')
         if not os.path.exists(metadata_path):
             try:
-                print(f"Metadata not found, generating...")
+                print(f"Metadata not found, attempting to generate...")
                 make_droid_metadata(metadata_path)
-            except Exception as e:
-                print(f"Warning: Make metadata failed: {e}")
+            except Exception:
+                pass 
             
         self.metadata = load_droid_metadata(metadata_path)
         self.metadata_keys = list(self.metadata.keys())
-        
-        self.width = width
-        self.height = height
-        self.num_frames = num_frames
-        self.sample_stride = sample_stride
+        self.video_operator = video_operator
         self.length = len(self.metadata)
-
+        
+        # [DiffSynth 兼容] 必须属性
         self.load_from_cache = False 
-
-        print(f"DroidDataset initialized. Target: {width}x{height}, Frames: {num_frames}")
+        print(f"DroidDataset V2.0 initialized. Samples: {self.length}")
 
     def __len__(self) -> int:
         return self.length
 
-    # 直接移植 unified_dataset.py 中 ImageCropAndResize 类的核心逻辑
-    def crop_and_resize(self, image: Image.Image, target_height: int, target_width: int):
-        """
-        Ref: ImageCropAndResize.crop_and_resize from unified_dataset.py
-        确保与项目原生预处理逻辑完全一致：
-        1. 计算 scale
-        2. Bilinear Resize
-        3. Center Crop
-        """
-        width, height = image.size
-        # 计算缩放比例，保证短边填满目标尺寸
-        scale = max(target_width / width, target_height / height)
-        
-        # 使用 torchvision 的 resize，插值方式为 BILINEAR
-        # round() 会四舍五入到最近的整数，而不是简单的向下取整
-        image = torchvision.transforms.functional.resize(
-            image,
-            (round(height*scale), round(width*scale)),
-            interpolation=torchvision.transforms.InterpolationMode.BILINEAR
-        )
-        image = torchvision.transforms.functional.center_crop(image, (target_height, target_width))
-        return image
-
-    def get_valid_frame_indices(self, total_frames):
-        req_frames = self.num_frames
-        
-        # 如果视频太短，降级 num_frames
-        if total_frames < req_frames:
-            req_frames = total_frames
-            # 确保满足 (n - 1) % 4 == 0 (例如 17, 13, 9, 5...)
-            while req_frames > 1 and req_frames % self.time_division_factor != self.time_division_remainder:
-                req_frames -= 1
-        
-        # 时序采样策略：长视频随机切片 (Random Crop)，短视频取全长
-        actual_span = (req_frames - 1) * self.sample_stride + 1
-        if total_frames >= actual_span:
-            max_start = total_frames - actual_span
-            start_idx = random.randint(0, max_start)
-            indices = [start_idx + i * self.sample_stride for i in range(req_frames)]
-        else:
-            # 极少数情况：如果连最小的合法序列都凑不齐（例如视频只有3帧），直接返回空或报错处理
-            # 这里简单返回从头开始的帧，后续由 collate_fn 或 loader 处理
-            indices = list(range(req_frames))
-            
-        return indices
-    
-    # 根据视频总帧数，计算出需要提取的有效帧索引列表
-    def process_video_frames(self, vr):
-        total_frames = len(vr)
-        indices = self.get_valid_frame_indices(total_frames)
-        
-        # 从 decord 读取
-        video_data = vr.get_batch(indices).asnumpy()
-        
-        processed_frames = []
-        for frame_arr in video_data:
-            img = Image.fromarray(frame_arr) # Numpy -> PIL
-            # 使用对齐后的 crop_and_resize
-            img = self.crop_and_resize(img, self.height, self.width)
-            processed_frames.append(img)
-            
-        return processed_frames
-
     def __getitem__(self, index: int) -> dict:
-        # 重试机制
+        # [保留] 核心重试机制：保证训练不中断
         for _ in range(10): 
             try:
-                # 随机打乱 index 避免连续失败死循环
+                # 随机打乱 index 避免死磕坏数据
                 if _ > 0: index = random.randint(0, self.length - 1)
                     
                 metadata = self.metadata[self.metadata_keys[index]]
                 
-                # 双视角策略：随机选择 Left 或 Right
-                # Droid 数据集提供了左右视角，随机选择相当于数据增强，不增加额外开销
+                # 双视角随机
                 use_left = random.random() < 0.5
                 video_path = metadata.left_mp4_path if use_left else metadata.right_mp4_path
                 
-                # 修正原版可能的路径错误（如果原metadata里路径不对，需在此处理）
-                # 假设 metadata 中的路径是相对路径，需要拼接前缀（如果有的话）
-                # 这里假设 load_droid_metadata 里已经处理好了，或者是相对路径
+                # [核心差异] 调用 Operator 处理视频
+                frames = self.video_operator(video_path)
                 
-                with temp_file_contextmanager(".mp4") as temp_file:
-                    self.s3.download_file(OSS_BUCKET, video_path, temp_file)
-                    with videoReader_contextmanager(temp_file) as vr:
-                        frames = self.process_video_frames(vr)
-                
-                if len(frames) == 0:
+                if not frames or len(frames) == 0:
                     raise ValueError("Empty video frames")
 
-                # 处理 Prompt
                 prompt = metadata.language_instruction1
                 if not prompt: prompt = "A robot performing a manipulation task."
                 
-                # 构建输出字典
-                # 注：vace_reference_image 取第0帧，符合 R2V 逻辑
+                # [DiffSynth VACE 格式] 确保 vace_reference_image 是 List
                 return {
                     "video": frames,               
                     "vace_video": frames,          
                     "vace_reference_image": [frames[0]], 
                     "prompt": prompt,
-                    # [Debug Info] 可以在这里返回视角信息，方便 Debug
-                    # "view": "left" if use_left else "right"
                 }
                 
             except Exception as e:
