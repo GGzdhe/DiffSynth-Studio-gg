@@ -211,18 +211,24 @@ class LoadVideoFromOSS:
     """
     负责从 OSS 下载视频、时序采样、解码
     """
-    def __init__(self, num_frames=49, sample_stride=1, sample_strategy="random", frame_processor=None):
-        self.num_frames = num_frames
-        self.sample_stride = sample_stride
-        self.sample_strategy = sample_strategy  # "random", "uniform", "start"
-        self.frame_processor = frame_processor  # 通常传入 ImageCropAndResize 实例
-        
-        # VAE 约束参数
-        self.time_division_factor = 4
-        self.time_division_remainder = 1
-        
-        self.s3 = boto3.client('s3')
-
+    def __init__(self, num_frames=81, time_division_factor=4, time_division_remainder=1, 
+                    frame_processor=lambda x: x, sample_strategy="random", frame_interval=3):
+            """
+            :param sample_strategy: 采样策略
+                - "start": 从头截取连续片段
+                - "random": 随机截取连续片段
+                - "uniform": 在整个视频时长内均匀采样
+                - "interval": 按照 frame_interval 指定的间隔进行随机采样 (新增!)
+            :param frame_interval: 当 sample_strategy 为 "interval" 时的采样间隔
+            """
+            self.num_frames = num_frames
+            self.time_division_factor = time_division_factor
+            self.time_division_remainder = time_division_remainder
+            self.frame_processor = frame_processor
+            self.sample_strategy = sample_strategy
+            self.frame_interval = frame_interval # 新增参数
+            self.s3 = boto3.client('s3')
+            
     def get_valid_indices(self, total_frames):
         """计算需要读取的帧索引"""
         req_frames = self.num_frames
