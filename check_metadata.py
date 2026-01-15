@@ -3,10 +3,13 @@ import os
 import pickle
 import pandas as pd
 
-# 1. 设置路径 (保持你之前的成功设置)
+# 设置路径并导入必要的类
 current_dir = os.getcwd()
 module_path = os.path.join(current_dir, "examples/wanvideo")
 sys.path.append(module_path)
+
+# 导入 Droid_DAindex 类定义，以便 pickle 能够反序列化
+from droid_load_dataset import Droid_DAindex
 
 metadata_path = "droid_metadata_with_annotations_success.pkl" 
 print(f"📖 正在读取元数据: {metadata_path} ...")
@@ -33,7 +36,7 @@ try:
         print(f"🔑 First Key: {first_key}")
         sample = data[first_key]
         
-    elif isinstance(data, pd.DataFrame):
+    elif HAS_PANDAS and isinstance(data, pd.DataFrame):
         print(f"ℹ️ 这是一个 Pandas DataFrame，行数: {len(data)}")
         if len(data) > 0:
             # 获取第一行

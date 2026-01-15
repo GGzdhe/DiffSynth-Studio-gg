@@ -1,15 +1,7 @@
 #!/bin/bash
 
-# 1. 激活环境 (已激活可注释)
-# source /mnt/gaoge/DiffSynth-Studio/.venv/bin/activate
-
 # 2. 设置路径
 export PYTHONPATH=$PYTHONPATH:$(pwd)
-
-export AWS_ACCESS_KEY_ID="01989CF435517971960CFB24AAE04E3B"       
-export AWS_SECRET_ACCESS_KEY="01989CF4355179609DADC82EC3B04ADD"   
-export S3_ENDPOINT_URL="http://aoss-internal.cn-sh-01b.sensecoreapi-oss.cn"         
-
 
 # 3. 定义本地模型路径 (JSON 格式)
 MODEL_PATHS='[
@@ -31,11 +23,12 @@ python -m accelerate.commands.accelerate_cli launch --num_processes 1 --mixed_pr
   --dataset_repeat 100 \
   --model_paths "$MODEL_PATHS" \
   --learning_rate 1e-4 \
-  --num_epochs 10 \
+  --num_epochs 15 \
   --remove_prefix_in_ckpt "pipe.vace." \
   --output_path "./models/train/Wan2.1-VACE-1.3B_Droid_Full" \
   --trainable_models "vace,dit" \
   --extra_inputs "vace_video,vace_reference_image" \
   --use_gradient_checkpointing_offload \
   --sample_strategy "random" \
+  --save_steps 15 \
   2>&1 | tee train_droid_log.txt

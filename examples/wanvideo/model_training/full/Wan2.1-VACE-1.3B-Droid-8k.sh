@@ -23,7 +23,7 @@ MODEL_PATHS='[
   --model_paths "$MODEL_PATHS" \
   --learning_rate 5e-5 \
   --num_epochs 10 \
-  --remove_prefix_in_ckpt "pipe.vace." \
+  --remove_prefix_in_ckpt "pipe.dit." \
   --output_path "./models/train/Wan2.1-VACE-1.3B_Droid_8GPU_Full" \
   --trainable_models "dit" \
   --extra_inputs "vace_video,vace_reference_image" \

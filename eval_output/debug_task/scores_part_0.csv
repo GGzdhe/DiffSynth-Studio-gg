@@ -1,0 +1,18 @@
+video_path,prompt,raw_output,final_score
+/mnt/afs_gaoge/DiffSynth-Studio/eval_output/debug_task/videos/rank0_idx0_Place_the_small_pill.mp4,"Place the small pillow against the right armrest, move the pillow in the middle to the right side of the sofa","Analysis: The video shows a robotic arm interacting with a couch in an indoor setting. The robotic arm is attempting to place a small pillow against the right armrest of the couch. However, the video does not show the subsequent step of moving the pillow in the middle to the right side of the sofa. This indicates that the video only partially aligns with the given text prompt.
+
+Visual Quality: 7.67
+Temporal Consistency: 6.39
+Dynamic Degree: 8.00
+Text-to-Video Alignment: 4.67
+Factual Consistency: 7.67
+Final Score: 6.53",6.53
+/mnt/afs_gaoge/DiffSynth-Studio/eval_output/debug_task/videos/rank0_idx100_Close_the_bottom_dra.mp4,Close the bottom drawer of the cabinet to the right.,"Analysis: The video shows a robotic arm attempting to close the bottom drawer of a cabinet located to the right. The arm is seen moving towards the drawer, but it does not successfully close it. The scene takes place in an office environment with various pieces of furniture and equipment visible in the background. 
+
+Visual Quality: 6.00
+Temporal Consistency: 4.33
+Dynamic Degree: 7.67
+Text-to-Video Alignment: 2.67
+Factual Consistency: 3.67
+
+Final Score: 4.60",4.6

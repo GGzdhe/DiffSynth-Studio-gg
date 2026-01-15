@@ -30,7 +30,6 @@ def fix_pickle():
         print(f"  ❌ 读取失败: {e}")
         return
 
-    # === 步骤 B: 偷天换日 (核心修复) ===
     # data 的值现在是 __main__.Droid_DAindex 类型
     # 我们要强制把它们的类型改成 droid_load_dataset.Droid_DAindex
     

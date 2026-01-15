@@ -1,0 +1,13 @@
+video_path,prompt,raw_output,final_score
+/mnt/afs_gaoge/DiffSynth-Studio/eval_output/test/_001/videos/rank0_idx0_Place_the_small_pillow_against.mp4,"Place the small pillow against the right armrest, move the pillow in the middle to the right side of the sofa","visual quality: 2
+ temporal consistency: 2
+ dynamic degree: 3
+ text-to-video alignment: 2
+ factual consistency: 3
+ Final Score: 2.33",233.0
+/mnt/afs_gaoge/DiffSynth-Studio/eval_output/test/_001/videos/rank0_idx100_Close_the_bottom_drawer_of_the.mp4,Close the bottom drawer of the cabinet to the right.,"visual quality: 2
+ temporal consistency: 1
+ dynamic degree: 3
+ text-to-video alignment: 1
+ factual consistency: 1
+ Final Score: 2.0",20.0

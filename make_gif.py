@@ -45,13 +45,24 @@ def create_comparison_gif(
         if not os.path.exists(path):
             print(f"❌ 警告: 文件不存在，跳过: {path}")
             continue
-            
         reader = imageio.get_reader(path)
-        length = reader.count_frames()
-        
+        # 兼容不同 reader 类型，优先用 count_frames，否则遍历统计
+        try:
+            length = reader.count_frames()
+        except Exception:
+            # LegacyReader 或部分格式不支持 count_frames
+            length = 0
+            try:
+                for _ in reader:
+                    length += 1
+            except Exception as e:
+                print(f"  - 读取帧数失败: {path}, 错误: {e}")
+                length = 0
+            # 重新打开 reader 以便后续读取
+            reader.close()
+            reader = imageio.get_reader(path)
         # 更新最大帧数
         max_frames = max(max_frames, length)
-        
         video_items.append({
             "reader": reader, 
             "path": path,
@@ -134,15 +145,13 @@ if __name__ == "__main__":
     
     # 1. 待拼接的视频路径列表
     VIDEO_LIST = [
-        "",
-        "/mnt/gaoge/DiffSynth-Studio/output_video/Wan2.1-VACE-1.3B_full_interval_dit/epoch-0/left_mp4_path/frames_49_seed_42/1000_Pick up the marker and put it in the bowl.mp4",
-        "/mnt/gaoge/DiffSynth-Studio/output_video/Wan2.1-VACE-1.3B_full_interval_dit/epoch-0/left_mp4_path/frames_81_seed_456/1000_Pick up the marker and put it in the bowl.mp4",
-        "/mnt/gaoge/DiffSynth-Studio/output_video/Wan2.1-VACE-1.3B_full_interval_dit/epoch-0/left_mp4_path/frames_121_seed_42/1000_Pick up the marker and put it in the bowl.mp4",
+        "/mnt/gaoge/DiffSynth-Studio/visual_check/uniform_49frames/idx_3000_video.gif",
+        "/mnt/gaoge/DiffSynth-Studio/output_video/Wan2.1-VACE-1.3B_full_uniform_dit/epoch-2/left_mp4_path/frames_49_seed_42/3000_Put the blue cube inside the cube-shaped wooden ob.mp4",
     ]
     
     # 2. 输出目录设置
     OUTPUT_DIR = "/mnt/gaoge/DiffSynth-Studio/result_gif/"
-    OUTPUT_FILENAME = "epoch0_interval_Pick up the marker and put it in the bowl.gif" 
+    OUTPUT_FILENAME = "epoch2_uniform_49_blue_cube.gif" 
     
     output_full_path = os.path.join(OUTPUT_DIR, OUTPUT_FILENAME)
     

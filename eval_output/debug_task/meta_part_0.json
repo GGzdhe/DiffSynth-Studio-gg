@@ -1,0 +1,12 @@
+[
+    {
+        "video_path": "/mnt/afs_gaoge/DiffSynth-Studio/eval_output/debug_task/videos/rank0_idx0_Place_the_small_pill.mp4",
+        "prompt": "Place the small pillow against the right armrest, move the pillow in the middle to the right side of the sofa",
+        "dataset_idx": 0
+    },
+    {
+        "video_path": "/mnt/afs_gaoge/DiffSynth-Studio/eval_output/debug_task/videos/rank0_idx100_Close_the_bottom_dra.mp4",
+        "prompt": "Close the bottom drawer of the cabinet to the right.",
+        "dataset_idx": 100
+    }
+]

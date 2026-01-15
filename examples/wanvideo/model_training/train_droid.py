@@ -17,9 +17,10 @@ from diffsynth.trainers.utils import DiffusionTrainingModule, ModelLogger, launc
 from diffsynth.trainers.unified_dataset import UnifiedDataset, LoadVideo, LoadAudio, ImageCropAndResize, ToAbsolutePath  # 导入统一数据集和相关数据处理算子
 
 try:
-    from droid_load_dataset import DroidDataset, LoadVideoFromOSS, ImageCropAndResize  # 尝试导入 DroidDataset 类
+    # 导入 DroidvideoDataset
+    from droid_load_dataset import DroidvideoDataset, LoadVideoFromOSS, ImageCropAndResize 
 except ImportError:
-    raise ImportError("Error: Could not import DroidDataset. Please make sure!") 
+    raise ImportError("Error: Could not import DroidvideoDataset. Please make sure!") 
     exit(1)
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"  # 关闭 tokenizer 的并行化以避免多进程/多线程警告
@@ -67,25 +68,21 @@ class WanTrainingModule(DiffusionTrainingModule):  # 定义继承自 DiffusionTr
         inputs_posi = {"prompt": data["prompt"]}  # 正向条件（正提示词）
         inputs_nega = {}  # 负向条件（负提示词），这里暂为空
         
-        # CFG-unsensitive parameters（对 CFG 不敏感的共享参数）
+        # CFG-unsensitive parameters（对 CFG 不敏感的共享参数）（CFG: Classifier-Free Guidance）
         inputs_shared = {
-            # Assume you are using this pipeline for inference,
-            # please fill in the input parameters.
-            "input_video": data["video"],  # 输入视频序列（通常是 PIL.Image 或类似对象列表）
-            "height": data["video"][0].size[1],  # 从第一帧获取视频高度
-            "width": data["video"][0].size[0],  # 从第一帧获取视频宽度
-            "num_frames": len(data["video"]),  # 视频帧数
-            # Please do not modify the following parameters
-            # unless you clearly know what this will cause.
-            "cfg_scale": 1,  # CFG scale，1 表示不做额外放大
-            "tiled": False,  # 是否使用分块生成
-            "rand_device": self.pipe.device,  # 随机数所在设备，使用管线当前设备
-            "use_gradient_checkpointing": self.use_gradient_checkpointing,  # 是否使用梯度检查点
-            "use_gradient_checkpointing_offload": self.use_gradient_checkpointing_offload,  # 是否 offload 梯度检查点
-            "cfg_merge": False,  # 是否进行 CFG 合并（管线内部使用）
-            "vace_scale": 1,  # VACE 相关缩放参数（特定算法使用）
-            "max_timestep_boundary": self.max_timestep_boundary,  # 最大时间步边界
-            "min_timestep_boundary": self.min_timestep_boundary,  # 最小时间步边界
+            "input_video": data["video"], 
+            "height": data["video"][0].size[1], 
+            "width": data["video"][0].size[0], 
+            "num_frames": len(data["video"]), 
+            "cfg_scale": 1, 
+            "tiled": False, 
+            "rand_device": self.pipe.device, 
+            "use_gradient_checkpointing": self.use_gradient_checkpointing, 
+            "use_gradient_checkpointing_offload": self.use_gradient_checkpointing_offload, 
+            "cfg_merge": False, 
+            "vace_scale": 1, 
+            "max_timestep_boundary": self.max_timestep_boundary, 
+            "min_timestep_boundary": self.min_timestep_boundary, 
         }
         
         # Extra inputs
@@ -96,76 +93,66 @@ class WanTrainingModule(DiffusionTrainingModule):  # 定义继承自 DiffusionTr
             elif extra_input == "end_image":
                 inputs_shared["end_image"] = data["video"][-1]  # 使用视频的最后一帧作为 end_image
             elif extra_input == "reference_image" or extra_input == "vace_reference_image":
-                inputs_shared[extra_input] = data[extra_input][0]  # 对于参考图像，通常从列表中取第 0 个
+                # inputs_shared[extra_input] = data[extra_input][0]  
+                # DroidvideoDataset 返回的 vace_reference_image 已经是 Image 对象，无需 [0]
+                inputs_shared[extra_input] = data[extra_input]
             else:
-                inputs_shared[extra_input] = data[extra_input]  # 其他额外字段直接从 data 中取
+                inputs_shared[extra_input] = data[extra_input] 
         
         # Pipeline units will automatically process the input parameters.
-        # 依次遍历管线中的每个 unit，由 unit_runner 根据 unit 类型处理输入
         for unit in self.pipe.units:
             inputs_shared, inputs_posi, inputs_nega = self.pipe.unit_runner(unit, self.pipe, inputs_shared, inputs_posi, inputs_nega)
-        return {**inputs_shared, **inputs_posi}  # 将共享参数与正向条件合并成最终的模型输入（训练时通常只需要正向分支）
+        return {**inputs_shared, **inputs_posi} 
     
     
-    def forward(self, data, inputs=None):  # 训练主前向函数
-        if inputs is None: inputs = self.forward_preprocess(data)  # 如果未传入预处理结果，则先做前处理
-        # 从管线中取出当前参与迭代优化的模型子模块（如 U-Net、VAE 等）
+    def forward(self, data, inputs=None): 
+        if inputs is None: inputs = self.forward_preprocess(data) 
         models = {name: getattr(self.pipe, name) for name in self.pipe.in_iteration_models}
-        # 调用管线的 training_loss 接口计算损失
         loss = self.pipe.training_loss(**models, **inputs)
-        return loss  # 返回标量或字典形式的损失
+        return loss
 
 
-if __name__ == "__main__":  # 仅当本文件作为脚本直接运行时执行下面的代码
-    parser = wan_parser()  # 创建 WAN 特定的命令行参数解析器
+if __name__ == "__main__": 
+    parser = wan_parser() 
 
     parser.add_argument("--droid_metadata_path",type=str,default="droid_metadata_with_annotations_success.pkl", help="Path to droid metadata pkl file")
 
     parser.add_argument("--sample_strategy", type=str, default="random", help="start, random, or uniform")
     
-    args = parser.parse_args()  # 解析命令行参数，得到 args 对象
+    args = parser.parse_args()  
     print(f" Initializing Droid Dataset from: {args.droid_metadata_path}")
     print(f" Config: {args.width}x{args.height}, Frames: {args.num_frames}, Strategy: {args.sample_strategy}")
 
-    # 组装 Dataset
-    
-    # 1. 实例化图片处理器 (Processor)
-    img_processor = ImageCropAndResize(
-        height=args.height, 
-        width=args.width
-    )
-    
-    # 2. 实例化视频加载器 (Operator)，注入处理器
-    video_loader = LoadVideoFromOSS(
-        num_frames=args.num_frames,
-        sample_stride=1,
-        sample_strategy=args.sample_strategy, # 使用命令行参数
-        frame_processor=img_processor
-    )
-    
-    # 3. 实例化数据集，注入加载器
-    dataset = DroidDataset(
-        metadata_path=args.droid_metadata_path,
-        video_operator=video_loader
-    )
+    # 对齐 train_wan.py 的 Dataset 初始化方式
+    dataset = DroidvideoDataset(
+        repeat=args.dataset_repeat,
+        video_operator = LoadVideoFromOSS(
+            args.num_frames, 
+            4, 
+            1, 
+            frame_processor=ImageCropAndResize(args.height, args.width, None, 16, 16), 
+            sample_strategy=args.sample_strategy
+        ),
+        video_list = ["left_mp4_path", "right_mp4_path"]
+    )    
     print(f" Dataset loaded! Total samples: {len(dataset)}")
 
-    model = WanTrainingModule(  # 实例化训练模块
-        model_paths=args.model_paths,  # 模型权重路径（支持多个）
-        model_id_with_origin_paths=args.model_id_with_origin_paths,  # model_id 与原始文件路径的映射
-        audio_processor_config=args.audio_processor_config,  # 音频处理器配置（可选）
-        trainable_models=args.trainable_models,  # 设置哪些子模块是可训练的
-        lora_base_model=args.lora_base_model,  # LoRA 的基模型名称
-        lora_target_modules=args.lora_target_modules,  # LoRA 作用的目标模块列表（逗号分隔）
-        lora_rank=args.lora_rank,  # LoRA 的 rank
-        lora_checkpoint=args.lora_checkpoint,  # 若有已有 LoRA checkpoint，可在此加载
-        use_gradient_checkpointing_offload=args.use_gradient_checkpointing_offload,  # 是否对梯度检查点做 offload
-        extra_inputs=args.extra_inputs,  # 额外输入字段（逗号分隔）
-        max_timestep_boundary=args.max_timestep_boundary,  # 最大时间步边界
-        min_timestep_boundary=args.min_timestep_boundary,  # 最小时间步边界
+    model = WanTrainingModule( 
+        model_paths=args.model_paths, 
+        model_id_with_origin_paths=args.model_id_with_origin_paths, 
+        audio_processor_config=args.audio_processor_config, 
+        trainable_models=args.trainable_models, 
+        lora_base_model=args.lora_base_model, 
+        lora_target_modules=args.lora_target_modules, 
+        lora_rank=args.lora_rank, 
+        lora_checkpoint=args.lora_checkpoint, 
+        use_gradient_checkpointing_offload=args.use_gradient_checkpointing_offload, 
+        extra_inputs=args.extra_inputs, 
+        max_timestep_boundary=args.max_timestep_boundary, 
+        min_timestep_boundary=args.min_timestep_boundary, 
     )
-    model_logger = ModelLogger(  # 构建模型日志记录和保存工具
-        args.output_path,  # 输出目录（保存日志、权重等）
-        remove_prefix_in_ckpt=args.remove_prefix_in_ckpt  # 是否在保存 checkpoint 时移除参数前缀
+    model_logger = ModelLogger( 
+        args.output_path, 
+        remove_prefix_in_ckpt=args.remove_prefix_in_ckpt 
     )
-    launch_training_task(dataset, model, model_logger, args=args)  # 启动训练任务，内部会创建 DataLoader、优化器、训练循环等
+    launch_training_task(dataset, model, model_logger, args=args)

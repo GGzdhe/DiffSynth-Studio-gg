@@ -1,5 +1,5 @@
 import torch
-import os # 处理文件和路径
+import os 
 import sys
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -13,9 +13,9 @@ from diffsynth.models import load_state_dict
 
 
 try:
-    from droid_load_dataset import DroidDataset, LoadVideoFromOSS, ImageCropAndResize
+    from droid_load_dataset import DroidvideoDataset, LoadVideoFromOSS, ImageCropAndResize
 except ImportError:
-    raise ImportError("Error: Could not import DroidDataset. Please make sure!")
+    raise ImportError("Error: Could not import DroidvideoDataset. Please make sure!")
 
 # 设置输出目录
 OUTPUT_DIR = "/mnt/gaoge/DiffSynth-Studio/output/"
@@ -48,7 +48,7 @@ def load_mixed_checkpoint(pipe, ckpt_path):
             # 兜底：如果是旧格式，尝试直接匹配
             dit_dict[clean_key] = value
             vace_dict[clean_key] = value
-            
+
     # 加载 DiT
     if len(dit_dict) > 0:
         print(f"   --> Found {len(dit_dict)} DiT weights, injecting...")
@@ -73,34 +73,37 @@ pipe = WanVideoPipeline.from_pretrained(
     ],
 )
 
-pipe.enable_vram_management() # 启用显存管理以节省显存
+pipe.enable_vram_management() 
 
-CKPT_PATH = "/mnt/gaoge/DiffSynth-Studio/models/train/Wan2.1-VACE-1.3B_Droid_8GPU_Full/epoch-1.safetensors"
+CKPT_PATH = "/mnt/afs_gaoge/DiffSynth-Studio/models/train/Wan2.1-VACE-1.3B_full_interval_dit/epoch-2.safetensors"
 
 if os.path.exists(CKPT_PATH):
     print(f"Loading fine-tuned weights from {CKPT_PATH}...")
-    # pipe = load_mixed_checkpoint(pipe, CKPT_PATH)
+    pipe = load_mixed_checkpoint(pipe, CKPT_PATH)
 else:
     print(f"Fine-tuned weights not found at {CKPT_PATH}, using base model weights.")
 
 print("Loading DroidDataset to get reference image and control video...")
-dataset = DroidDataset(
-    metadata_path = "/mnt/gaoge/DiffSynth-Studio/droid_metadata_with_annotations_success.pkl",
+
+# 对齐 infer_wan.py 的 Dataset 初始化
+dataset = DroidvideoDataset(
+    repeat=1,
     video_operator = LoadVideoFromOSS(
-        num_frames=49, 
-        sample_stride=1, 
-        sample_strategy="random", 
-        frame_processor=ImageCropAndResize(height=480, width=832)
-    )
+        49, 4, 1, 
+        frame_processor=ImageCropAndResize(480, 832, None, 16, 16), 
+        sample_strategy="start"
+    ),
+    video_list = ["left_mp4_path"]
 )
 
-# 选择一个测试样本 (可以随便选)
+# 选择一个测试样本
 sample_index = 0
 data_sample = dataset[sample_index]
 
 prompt = data_sample["prompt"]
-# 返回的 vace_refimage 是一个 List [Image]，这正是 pipe 需要的
-vace_ref_image = data_sample["vace_reference_image"] 
+# DroidvideoDataset 返回的是单张图
+# vace_ref_image = data_sample["vace_reference_image"] # 原代码
+vace_ref_image = [data_sample["vace_reference_image"]]
 
 print(f"   - 样本 ID: {sample_index}")
 print(f"   - Prompt: {prompt}")
